@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard Meteorológico</title>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --fundo: #081426;
+      --cartao: #13243c;
+      --borda: #294363;
+      --texto: #f3f7ff;
+      --texto-suave: #b9c8dc;
+      --destaque: #38d9f5;
+      --campo: #0b1930;
+      --sombra: 0 12px 32px rgba(0,0,0,.22);
+    }
+    body.claro {
+      color-scheme: light;
+      --fundo: #eef4fb;
+      --cartao: #ffffff;
+      --borda: #d4e0ef;
+      --texto: #17263d;
+      --texto-suave: #53657c;
+      --destaque: #087eaa;
+      --campo: #f5f8fc;
+      --sombra: 0 12px 28px rgba(25,50,80,.10);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding: 24px;
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--fundo);
+      color: var(--texto);
+      transition: background .2s, color .2s;
+    }
+    .container { max-width: 1100px; margin: 0 auto; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:20px; }
+    h1 { font-size: clamp(1.5rem, 4vw, 2.1rem); margin:0 0 6px; }
+    h2 { font-size:1.15rem; margin:0 0 16px; }
+    p { color:var(--texto-suave); }
+    .subtitulo { margin:0; }
+    .card { background:var(--cartao); border:1px solid var(--borda); border-radius:20px; padding:24px; margin-bottom:18px; box-shadow:var(--sombra); }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    input, select, button {
+      min-height:42px; padding:10px 12px; border-radius:10px; border:1px solid var(--borda);
+      background:var(--campo); color:var(--texto); font:inherit;
+    }
+    input { flex:1 1 190px; }
+    button { cursor:pointer; font-weight:700; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline:3px solid var(--destaque); outline-offset:2px; }
+    .primary { background:var(--destaque); color:#062033; border-color:transparent; }
+    button:hover { filter:brightness(1.08); }
+    button:disabled { opacity:.65; cursor:wait; }
+    .pill { display:inline-flex; gap:6px; align-items:center; padding:7px 12px; border-radius:999px; border:1px solid var(--borda); color:var(--texto-suave); font-size:.9rem; }
+    #mensagem { min-height:24px; margin:14px 0 4px; color:var(--texto-suave); }
+    .weather-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; margin-top:18px; }
+    .weather-item { background:var(--campo); border:1px solid var(--borda); border-radius:16px; padding:18px; min-width:0; }
+    .weather-label { color:var(--texto-suave); font-size:.95rem; margin-bottom:10px; }
+    .weather-value { font-size:clamp(1.45rem,3vw,2rem); font-weight:700; color:var(--destaque); overflow-wrap:anywhere; }
+    .weather-description { margin-top:8px; color:var(--texto-suave); text-transform:capitalize; }
+    .section-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+    .chart-wrap { position:relative; height:330px; }
+    #historico { padding-left:22px; color:var(--texto-suave); }
+    #historico li { margin:8px 0; }
+    .muted { color:var(--texto-suave); font-size:.9rem; }
+    .error { color:#ff8d9a !important; }
+    .success { color:#5ce0a0 !important; }
+    footer { text-align:center; color:var(--texto-suave); font-size:.85rem; padding:8px 0 18px; }
+    @media (max-width:600px) { body { padding:14px; } .card { padding:18px; } .chart-wrap { height:280px; } header { align-items:flex-start; } }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <header>
+      <div>
+        <h1>🌦️ Dashboard Meteorológico</h1>
+        <p class="subtitulo">Monitoramento do clima com OpenWeatherMap, MQTT e ESP32</p>
+      </div>
+      <button id="tema" type="button" aria-pressed="false">☀️ Tema claro</button>
+    </header>
+
+    <section class="card" aria-labelledby="titulo-consulta">
+      <div class="section-heading">
+        <h2 id="titulo-consulta">📍 Consultar cidade</h2>
+        <span class="pill">Cidade atual: <strong id="cidadeAtual">—</strong></span>
+      </div>
+      <form id="formCidade" class="row">
+        <label for="cidade" class="muted">Cidade</label>
+        <input id="cidade" type="text" placeholder="Ex.: São Paulo" autocomplete="address-level2" required />
+        <label for="pais" class="muted">País</label>
+        <select id="pais">
+          <option value="BR">Brasil (BR)</option><option value="US">Estados Unidos (US)</option>
+          <option value="PT">Portugal (PT)</option><option value="AR">Argentina (AR)</option><option value="CL">Chile (CL)</option>
+        </select>
+        <button id="aplicar" class="primary" type="submit">Buscar clima</button>
+        <button id="favoritar" type="button">☆ Salvar favorita</button>
+        <button id="buscarFavorita" type="button">★ Usar favorita</button>
+      </form>
+      <div id="mensagem" role="status" aria-live="polite">Digite uma cidade para consultar o clima.</div>
+      <div class="row muted">
+        <span>🕒 Última atualização: <strong id="atualizadoEm">Ainda não consultado</strong></span>
+        <span>📡 MQTT: <strong id="mqttStatus">Conectando...</strong></span>
+      </div>
+      <div class="weather-grid">
+        <div class="weather-item"><div class="weather-label">🌡️ Temperatura</div><div class="weather-value" id="temp">-- °C</div><div class="weather-description" id="descricao">Condição do tempo</div></div>
+        <div class="weather-item"><div class="weather-label">🤗 Sensação térmica</div><div class="weather-value" id="sensacao">-- °C</div></div>
+        <div class="weather-item"><div class="weather-label">💧 Umidade</div><div class="weather-value" id="hum">-- %</div></div>
+        <div class="weather-item"><div class="weather-label">💨 Velocidade do vento</div><div class="weather-value" id="vento">-- m/s</div></div>
+        <div class="weather-item"><div class="weather-label">🧭 Pressão atmosférica</div><div class="weather-value" id="pressao">-- hPa</div></div>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="titulo-grafico">
+      <div class="section-heading"><h2 id="titulo-grafico">📈 Histórico do clima</h2><span class="muted">Até 30 leituras nesta sessão</span></div>
+      <div class="chart-wrap"><canvas id="chart" role="img" aria-label="Gráfico com histórico de temperatura e umidade"></canvas></div>
+    </section>
+
+    <section class="card" aria-labelledby="titulo-historico">
+      <div class="section-heading"><h2 id="titulo-historico">🗂️ Consultas recentes</h2><button id="limparHistorico" type="button">Limpar histórico</button></div>
+      <ol id="historico"><li>Nenhuma consulta registrada ainda.</li></ol>
+    </section>
+    <footer>Dashboard desenvolvido para acompanhar dados meteorológicos e comunicação MQTT.</footer>
+  </main>
+
+  <script>
+    // Coloque sua chave da OpenWeatherMap entre as aspas. Não compartilhe sua chave publicamente.
+    const OPENWEATHER_API_KEY = "_COLE_SUA_CHAVE_AQUI_";
+    const MQTT_BROKER = "ws://broker.hivemq.com:8000/mqtt";
+    const TOPIC_TEMPERATURA = "esp32/clima/temperatura";
+    const TOPIC_UMIDADE = "esp32/clima/umidade";
+    const TOPIC_CIDADE_ATUAL = "esp32/clima/cidadeAtual";
+    const TOPIC_CIDADE = "esp32/clima/cidade";
+
+    const el = (id) => document.getElementById(id);
+    let ultimaConsulta = null;
+    let favorito = null;
+    let historico = [];
+
+    try { favorito = JSON.parse(localStorage.getItem("climaCidadeFavorita") || "null"); } catch (_) { favorito = null; }
+    try { historico = JSON.parse(localStorage.getItem("climaHistorico") || "[]"); if (!Array.isArray(historico)) historico = []; } catch (_) { historico = []; }
+
+    // Tema escuro/claro
+    const temaSalvo = localStorage.getItem("climaTema");
+    if (temaSalvo === "claro") document.body.classList.add("claro");
+    atualizarBotaoTema();
+    el("tema").addEventListener("click", () => {
+      document.body.classList.toggle("claro");
+      const tema = document.body.classList.contains("claro") ? "claro" : "escuro";
+      localStorage.setItem("climaTema", tema);
+      atualizarBotaoTema();
+      chart.options.plugins.legend.labels.color = getComputedStyle(document.body).getPropertyValue("--texto").trim();
+      chart.options.plugins.title.color = getComputedStyle(document.body).getPropertyValue("--texto").trim();
+      chart.options.scales.x.ticks.color = getComputedStyle(document.body).getPropertyValue("--texto-suave").trim();
+      chart.options.scales.y.ticks.color = getComputedStyle(document.body).getPropertyValue("--texto-suave").trim();
+      chart.options.scales.x.grid.color = document.body.classList.contains("claro") ? "rgba(0,0,0,.08)" : "rgba(255,255,255,.08)";
+      chart.options.scales.y.grid.color = chart.options.scales.x.grid.color;
+      chart.update();
+    });
+    function atualizarBotaoTema() {
+      const claro = document.body.classList.contains("claro");
+      el("tema").textContent = claro ? "🌙 Tema escuro" : "☀️ Tema claro";
+      el("tema").setAttribute("aria-pressed", String(claro));
+    }
+
+    const chart = new Chart(el("chart").getContext("2d"), {
+      type: "line",
+      data: { labels: [], datasets: [
+        { label: "Temperatura (°C)", data: [], borderColor: "#ff6b6b", backgroundColor: "rgba(255,107,107,.13)", fill: true, tension: .3, yAxisID: "y" },
+        { label: "Umidade (%)", data: [], borderColor: "#38d9f5", backgroundColor: "rgba(56,217,245,.10)", fill: true, tension: .3, yAxisID: "y1" }
+      ] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          title: { display: true, text: "Histórico do clima", color: "#f3f7ff", font: { size: 18 } },
+          legend: { display: true, labels: { color: "#eaf2ff" } }
+        },
+        scales: {
+          x: { ticks: { color: "#b9c8dc" }, grid: { color: "rgba(255,255,255,.08)" }, title: { display: true, text: "Horário da consulta", color: "#b9c8dc" } },
+          y: { position: "left", ticks: { color: "#b9c8dc" }, grid: { color: "rgba(255,255,255,.08)" }, title: { display: true, text: "Temperatura (°C)", color: "#b9c8dc" } },
+          y1: { position: "right", min: 0, max: 100, ticks: { color: "#b9c8dc" }, grid: { drawOnChartArea: false }, title: { display: true, text: "Umidade (%)", color: "#b9c8dc" } }
+        }
+      }
+    });
+
+    // Conexão MQTT. O dashboard continua funcionando pela API se o broker não conectar.
+    let client = null;
+    try {
+      client = mqtt.connect(MQTT_BROKER, { connectTimeout: 8000, reconnectPeriod: 3000 });
+      client.on("connect", () => {
+        el("mqttStatus").textContent = "Conectado";
+        el("mqttStatus").className = "success";
+        client.subscribe([TOPIC_TEMPERATURA, TOPIC_UMIDADE, TOPIC_CIDADE_ATUAL], (erro) => {
+          if (erro) console.error("Erro ao assinar tópicos MQTT:", erro);
+        });
+      });
+      client.on("reconnect", () => { el("mqttStatus").textContent = "Reconectando..."; el("mqttStatus").className = ""; });
+      client.on("offline", () => { el("mqttStatus").textContent = "Desconectado"; el("mqttStatus").className = "error"; });
+      client.on("error", (erro) => { console.error("Erro MQTT:", erro); el("mqttStatus").textContent = "Erro de conexão"; el("mqttStatus").className = "error"; });
+      client.on("message", (topic, message) => {
+        const valorTexto = message.toString();
+        const valor = Number.parseFloat(valorTexto);
+        if (topic === TOPIC_TEMPERATURA && Number.isFinite(valor)) el("temp").textContent = `${valor} °C`;
+        if (topic === TOPIC_UMIDADE && Number.isFinite(valor)) el("hum").textContent = `${valor} %`;
+        if (topic === TOPIC_CIDADE_ATUAL) el("cidadeAtual").textContent = valorTexto;
+      });
+    } catch (erro) {
+      console.error("Não foi possível iniciar MQTT:", erro);
+      el("mqttStatus").textContent = "Indisponível";
+    }
+
+    function mostrarMensagem(texto, tipo = "") {
+      el("mensagem").textContent = texto;
+      el("mensagem").className = tipo;
+    }
+
+    function adicionarAoGrafico(temperatura, umidade) {
+      chart.data.labels.push(new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+      chart.data.datasets[0].data.push(temperatura);
+      chart.data.datasets[1].data.push(umidade);
+      while (chart.data.labels.length > 30) {
+        chart.data.labels.shift();
+        chart.data.datasets.forEach((dataset) => dataset.data.shift());
+      }
+      chart.update();
+    }
+
+    function salvarHistorico(registro) {
+      historico.unshift(registro);
+      historico = historico.slice(0, 8);
+      try { localStorage.setItem("climaHistorico", JSON.stringify(historico)); } catch (erro) { console.warn("Não foi possível salvar histórico:", erro); }
+      renderizarHistorico();
+    }
+    function renderizarHistorico() {
+      const lista = el("historico");
+      lista.replaceChildren();
+      if (!historico.length) {
+        const item = document.createElement("li"); item.textContent = "Nenhuma consulta registrada ainda."; lista.appendChild(item); return;
+      }
+      historico.forEach((registro) => {
+        const item = document.createElement("li");
+        item.textContent = `${registro.cidade} — ${registro.temperatura} °C, umidade ${registro.umidade}% — ${registro.hora}`;
+        lista.appendChild(item);
+      });
+    }
+    renderizarHistorico();
+
+    async function buscarClima(cidade, pais) {
+      if (!OPENWEATHER_API_KEY || OPENWEATHER_API_KEY === "COLE_SUA_CHAVE_AQUI") {
+        mostrarMensagem("⚠️ Primeiro, coloque sua chave da OpenWeatherMap na variável OPENWEATHER_API_KEY no código.", "error");
+        return;
+      }
+      el("aplicar").disabled = true;
+      el("aplicar").textContent = "Buscando...";
+      mostrarMensagem("🌐 Consultando dados meteorológicos...", "");
+      try {
+        const url = new URL("https://api.openweathermap.org/data/2.5/weather");
+        url.search = new URLSearchParams({ q: `${cidade},${pais}`, appid: OPENWEATHER_API_KEY, units: "metric", lang: "pt_br" }).toString();
+        const resposta = await fetch(url);
+        if (!resposta.ok) {
+          if (resposta.status === 404) throw new Error("Cidade não encontrada. Confira o nome e tente novamente.");
+          if (resposta.status === 401) throw new Error("Chave da API inválida ou ainda não ativada. Confira sua API Key.");
+          if (resposta.status === 429) throw new Error("Muitas consultas em pouco tempo. Aguarde um pouco e tente novamente.");
+          throw new Error(`Não foi possível consultar o clima (erro ${resposta.status}). Tente novamente.`);
+        }
+        const dados = await resposta.json();
+        if (!dados.main || !dados.wind) throw new Error("A resposta da API veio incompleta. Tente novamente.");
+        const temperatura = Number(dados.main.temp);
+        const sensacao = Number(dados.main.feels_like);
+        const umidade = Number(dados.main.humidity);
+        const vento = Number(dados.wind.speed);
+        const pressao = Number(dados.main.pressure);
+        const nomeCidade = dados.name || cidade;
+        const descricao = dados.weather?.[0]?.description || "Condição não informada";
+        if (![temperatura, sensacao, umidade, vento, pressao].every(Number.isFinite)) throw new Error("Alguns dados recebidos não são válidos.");
+
+        el("temp").textContent = `${temperatura.toFixed(1)} °C`;
+        el("sensacao").textContent = `${sensacao.toFixed(1)} °C`;
+        el("hum").textContent = `${umidade} %`;
+        el("vento").textContent = `${vento.toFixed(1)} m/s`;
+        el("pressao").textContent = `${pressao} hPa`;
+        el("descricao").textContent = descricao;
+        el("cidadeAtual").textContent = `${nomeCidade}, ${pais}`;
+        const agora = new Date();
+        el("atualizadoEm").textContent = agora.toLocaleString("pt-BR");
+        ultimaConsulta = { cidade: nomeCidade, pais, temperatura, sensacao, umidade, vento, pressao };
+        adicionarAoGrafico(temperatura, umidade);
+        salvarHistorico({ cidade: `${nomeCidade}, ${pais}`, temperatura: temperatura.toFixed(1), umidade, hora: agora.toLocaleTimeString("pt-BR") });
+
+        if (client && client.connected) {
+          client.publish(TOPIC_TEMPERATURA, String(temperatura));
+          client.publish(TOPIC_UMIDADE, String(umidade));
+          client.publish(TOPIC_CIDADE_ATUAL, `${nomeCidade}, ${pais}`);
+        }
+        mostrarMensagem(`✅ Clima de ${nomeCidade} atualizado com sucesso!`, "success");
+      } catch (erro) {
+        console.error("Erro ao consultar OpenWeatherMap:", erro);
+        mostrarMensagem(`❌ ${erro.message || "Ocorreu um erro inesperado. Tente novamente."}`, "error");
+      } finally {
+        el("aplicar").disabled = false;
+        el("aplicar").textContent = "Buscar clima";
+      }
+    }
+
+    el("formCidade").addEventListener("submit", async (evento) => {
+      evento.preventDefault();
+      const cidade = el("cidade").value.trim();
+      const pais = el("pais").value;
+      if (!cidade) { mostrarMensagem("Digite o nome de uma cidade para continuar.", "error"); el("cidade").focus(); return; }
+      if (client && client.connected) client.publish(TOPIC_CIDADE, `${cidade},${pais}`);
+      await buscarClima(cidade, pais);
+    });
+
+    el("favoritar").addEventListener("click", () => {
+      const cidade = el("cidade").value.trim() || (ultimaConsulta && ultimaConsulta.cidade);
+      const pais = el("pais").value;
+      if (!cidade) { mostrarMensagem("Digite uma cidade antes de salvar como favorita.", "error"); return; }
+      favorito = { cidade, pais };
+      try { localStorage.setItem("climaCidadeFavorita", JSON.stringify(favorito)); } catch (erro) { console.warn("Não foi possível salvar favorita:", erro); }
+      mostrarMensagem(`⭐ ${cidade} foi salva como cidade favorita.`, "success");
+    });
+    el("buscarFavorita").addEventListener("click", async () => {
+      if (!favorito) { mostrarMensagem("Você ainda não salvou uma cidade favorita.", "error"); return; }
+      el("cidade").value = favorito.cidade;
+      el("pais").value = favorito.pais;
+      await buscarClima(favorito.cidade, favorito.pais);
+    });
+    el("limparHistorico").addEventListener("click", () => {
+      historico = [];
+      try { localStorage.removeItem("climaHistorico"); } catch (erro) { console.warn(erro); }
+      renderizarHistorico();
+      mostrarMensagem("Histórico de consultas limpo.", "success");
+    });
+  </script>
+</body>
+</html>
